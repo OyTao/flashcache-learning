@@ -514,7 +514,7 @@ flashcache_do_pending_noerror(struct kcached_job *job)
 		cacheblk->nr_queued--;
 		if (pending_job->action == INVALIDATE) {
 			DPRINTK("flashcache_do_pending: INVALIDATE  %llu",
-				next_job->bio->bi_sector);
+				pending_job->bio->bi_sector);
 			VERIFY(pending_job->bio != NULL);
 			queued = flashcache_inval_blocks(dmc, pending_job->bio);
 			if (queued) {
@@ -664,6 +664,7 @@ flashcache_lookup(struct cache_c *dmc, struct bio *bio, int *index)
 	start_index = dmc->assoc * set_number;
 	DPRINTK("Cache lookup : dbn %llu(%lu), set = %d",
 		dbn, io_size, set_number);
+
 	find_valid_dbn(dmc, dbn, start_index, index);
 	if (*index >= 0) {
 		DPRINTK("Cache lookup HIT: Block %llu(%lu): VALID index %d",
@@ -671,15 +672,20 @@ flashcache_lookup(struct cache_c *dmc, struct bio *bio, int *index)
 		/* We found the exact range of blocks we are looking for */
 		return VALID;
 	}
+
 	invalid = find_invalid_dbn(dmc, set_number);
 	if (invalid == -1) {
 		/* We didn't find an invalid entry, search for oldest valid entry */
 		find_reclaim_dbn(dmc, start_index, &oldest_clean);
 	}
+
 	/* 
 	 * Cache miss :
 	 * We can't choose an entry marked INPROG, but choose the oldest
 	 * INVALID or the oldest VALID entry.
+	 */
+	/*
+	 * OyTao: used (start_index + dmc->assoc as flag to check)
 	 */
 	*index = start_index + dmc->assoc;
 	if (invalid != -1) {
@@ -751,6 +757,9 @@ flashcache_free_md_sector(struct kcached_job *job)
 	job->pl_base[0].page = NULL;
 }
 
+/*
+ * OyTao: write metadata to cache device.
+ */
 void
 flashcache_md_write_kickoff(struct kcached_job *job)
 {
@@ -773,6 +782,7 @@ flashcache_md_write_kickoff(struct kcached_job *job)
 		flashcache_md_write_callback(-EIO, job);
 		return;
 	}
+
 	/*
 	 * Transfer whatever is on the pending queue to the md_io_inprog queue.
 	 */
@@ -781,6 +791,10 @@ flashcache_md_write_kickoff(struct kcached_job *job)
 	spin_lock(&md_block_head->md_block_lock);
 	md_block_head->md_io_inprog = md_block_head->queued_updates;
 	md_block_head->queued_updates = NULL;
+
+	/*
+	 * OyTao: copy all metadatas of one meta-block size to @my_block.
+	 */
 	md_block = job->md_block;
 	md_block_ix = INDEX_TO_MD_BLOCK(dmc, job->index) * MD_SLOTS_PER_BLOCK(dmc);
 	/* First copy out the entire md block */
@@ -794,6 +808,12 @@ flashcache_md_write_kickoff(struct kcached_job *job)
 		md_block[i].cache_state = 
 			dmc->cache[md_block_ix].cache_state & (VALID | INVALID | DIRTY);
 	}
+
+	/*
+	 * OyTao: update current job's cache state. 
+	 * writecache action ,set cache_state to be valid and dirty.
+	 * if write disk, only set cache_state to be valid.
+	 */
 	/* Then set/clear the DIRTY bit for the "current" index */
 	if (job->action == WRITECACHE) {
 		/* DIRTY the cache block */
@@ -804,6 +824,10 @@ flashcache_md_write_kickoff(struct kcached_job *job)
 		md_block[INDEX_TO_MD_BLOCK_OFFSET(dmc, job->index)].cache_state = VALID;
 	}
 
+
+	/*
+	 * OyTao: only write_disk or write_cache operation can change the state.
+	 */
 	for (job = md_block_head->md_io_inprog ; 
 	     job != NULL ;
 	     job = job->next) {
@@ -817,6 +841,7 @@ flashcache_md_write_kickoff(struct kcached_job *job)
 			md_block[INDEX_TO_MD_BLOCK_OFFSET(dmc, job->index)].cache_state = VALID;
 		}
 	}
+
 	spin_unlock(&md_block_head->md_block_lock);
 	spin_unlock_irq(&cache_set->set_spin_lock);
 	where.bdev = dmc->cache_dev->bdev;
@@ -979,6 +1004,11 @@ flashcache_md_write(struct kcached_job *job)
 	VERIFY(job->action == WRITEDISK || job->action == WRITECACHE || 
 	       job->action == WRITEDISK_SYNC);
 	md_block_head = &dmc->md_blocks_buf[INDEX_TO_MD_BLOCK(dmc, job->index)];
+
+	/*
+	 * OyTao: add all meta-data operation into queued_updates.
+	 * if have many jobs to update meta-datas in same block
+	 */
 	spin_lock_irqsave(&md_block_head->md_block_lock, flags);
 	/* If a write is in progress for this metadata sector, queue this update up */
 	if (md_block_head->nr_in_prog != 0) {
@@ -1057,6 +1087,9 @@ flashcache_kcopyd_callback(int read_err, unsigned int write_err, void *context)
 	}
 }
 
+/*
+ * OyTao: cache block status must be DISKWRITEINPROG & Dirty
+ */
 static void
 flashcache_dirty_writeback(struct cache_c *dmc, int index)
 {
@@ -1067,19 +1100,26 @@ flashcache_dirty_writeback(struct cache_c *dmc, int index)
 	struct cache_set *cache_set = &dmc->cache_sets[set];
 	
 	DPRINTK("flashcache_dirty_writeback: Index %d", index);
+	/*
+	 * OyTao: have the lock to verify state and handle static info 
+	 */
 	spin_lock_irq(&cache_set->set_spin_lock);
 	VERIFY((cacheblk->cache_state & BLOCK_IO_INPROG) == DISKWRITEINPROG);
 	VERIFY(cacheblk->cache_state & DIRTY);
 	cache_set->clean_inprog++;
 	atomic_inc(&dmc->clean_inprog);
 	spin_unlock_irq(&cache_set->set_spin_lock);
+
 	job = new_kcached_job(dmc, NULL, index);
+
+	/* OyTao: erro inject(ignore) */
 	if (unlikely(dmc->sysctl_error_inject & DIRTY_WRITEBACK_JOB_ALLOC_FAIL)) {
 		if (job)
 			flashcache_free_cache_job(job);
 		job = NULL;
 		dmc->sysctl_error_inject &= ~DIRTY_WRITEBACK_JOB_ALLOC_FAIL;
 	}
+
 	/*
 	 * If the device is being removed, do not kick off any more cleanings.
 	 */
@@ -1091,10 +1131,13 @@ flashcache_dirty_writeback(struct cache_c *dmc, int index)
 		job = NULL;
 		device_removal = 1;
 	}
+
 	if (unlikely(job == NULL)) {
 		spin_lock_irq(&cache_set->set_spin_lock);
 		cache_set->clean_inprog--;
 		atomic_dec(&dmc->clean_inprog);
+
+		/* OyTao: Now have not enough memory, need to free all pending jobs */
 		flashcache_free_pending_jobs(dmc, cacheblk, -EIO);
 		cacheblk->cache_state &= ~(BLOCK_IO_INPROG);
 		spin_unlock_irq(&cache_set->set_spin_lock);
@@ -1674,6 +1717,13 @@ flashcache_inval_block_set_v3_checks(struct cache_c *dmc, int set, struct bio *b
 }
 #endif
 
+/*
+ * OyTao: the caller must have the cacheset lock 
+ * 1. if the cache block have no pending job and not in prog status,
+ *	  remove from valid list and insert into invalid list.
+ * 2. else new one pending job on the cache block, and if the cache block is 
+ *	  dirty, write back the data.
+ */
 static int
 flashcache_inval_block_set_v3(struct cache_c *dmc, int set, struct bio *bio, 
 			      struct pending_job *pjob)
@@ -1707,6 +1757,7 @@ flashcache_inval_block_set_v3(struct cache_c *dmc, int set, struct bio *bio,
 #endif
 		return 0;
 	}
+	/* OyTao find the cached block */
 	cacheblk = &dmc->cache[index];
 	VERIFY(cacheblk->cache_state & VALID);
 	/* We have a match */
@@ -1715,13 +1766,20 @@ flashcache_inval_block_set_v3(struct cache_c *dmc, int set, struct bio *bio,
 	} else {
 		dmc->flashcache_stats.rd_invalidates++;
 	}
+
 	if (!(cacheblk->cache_state & (BLOCK_IO_INPROG | DIRTY)) &&
 	    (cacheblk->nr_queued == 0)) {
 		atomic_dec(&dmc->cached_blocks);
+#if 0
 		DPRINTK("Cache invalidate (!BUSY): Block %llu %lx",
 			start_dbn, cacheblk->cache_state);
+#endif
+		DPRINTK("Cache invalidate (!BUSY): Block %lx",
+			cacheblk->cache_state);
+
 		flashcache_hash_remove(dmc, index);
 		cacheblk->cache_state = INVALID;
+
 		flashcache_invalid_insert(dmc, index);
 		return 0;
 	}
@@ -1734,7 +1792,9 @@ flashcache_inval_block_set_v3(struct cache_c *dmc, int set, struct bio *bio,
 	 * on it, the do_pending handler will clean the block
 	 * and then process the pending queue.
 	 */
+	/* OyTao: add pending job about the @cache_block */
 	flashcache_enq_pending(dmc, bio, index, INVALIDATE, pjob);
+
 	if ((cacheblk->cache_state & (DIRTY | BLOCK_IO_INPROG)) == DIRTY) {
 		/* 
 		 * Kick off block write.
@@ -1749,14 +1809,24 @@ flashcache_inval_block_set_v3(struct cache_c *dmc, int set, struct bio *bio,
 		 * at the cost of a context switch.
 		 */
 		cacheblk->cache_state |= DISKWRITEINPROG;
+		/* 
+		 * OyTao: write back model need to clean fallow flag
+		 * fallow flag : need to write back to normal disk.
+		 */
 		flashcache_clear_fallow(dmc, index);
+
 		flashcache_setlocks_multidrop(dmc, bio);
+
 		flashcache_dirty_writeback(dmc, index); /* Must inc nr_jobs */
+
 		flashcache_setlocks_multiget(dmc, bio);
 	}
 	return 1;
 }
 
+/*
+ * OyTao: in this function, maybe drop the cacheset lock.
+ */
 static int
 flashcache_inval_blocks(struct cache_c *dmc, struct bio *bio)
 {	
@@ -2033,6 +2103,9 @@ flashcache_write(struct cache_c *dmc, struct bio *bio)
 	 * send the request to disk. Before we do that, we must check 
 	 * for potential invalidations !
 	 */
+	/*
+	 * OyTao: why need to check again?
+	 */
 	queued = flashcache_inval_blocks(dmc, bio);
 	flashcache_setlocks_multidrop(dmc, bio);
 	if (queued) {
@@ -2057,6 +2130,9 @@ flashcache_write(struct cache_c *dmc, struct bio *bio)
 #endif
 #endif
 
+/*
+ * OyTao: 
+ */
 static void
 flashcache_do_block_checks(struct cache_c *dmc, struct bio *bio)
 {
@@ -2064,11 +2140,16 @@ flashcache_do_block_checks(struct cache_c *dmc, struct bio *bio)
 	sector_t io_start;
 	sector_t io_end;
 
+	/* OyTao: how to make sure the bio size is less than cache block size ?*/
 	VERIFY(to_sector(bio->bi_size) <= dmc->block_size);
 	mask = ~((1 << dmc->block_shift) - 1);
 	io_start = bio->bi_sector & mask;
 	io_end = (bio->bi_sector + (to_sector(bio->bi_size) - 1)) & mask;
 	/* The incoming bio must NOT straddle a blocksize boundary */
+	/*
+	 *printk("OyTao bio size(sectors):%d, io_start:%d, id_end:%d\n", 
+	 *    to_sector(bio->bi_size), io_start, io_end);
+	 */
 	VERIFY(io_start == io_end);
 }
 
@@ -2076,6 +2157,9 @@ flashcache_do_block_checks(struct cache_c *dmc, struct bio *bio)
  * Decide the mapping and perform necessary cache operations for a bio request.
  */
 int
+/* 
+ * OyTao: entrance of all ios 
+ */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0)
 flashcache_map(struct dm_target *ti, struct bio *bio,
 	       union map_info *map_context)
@@ -2092,12 +2176,16 @@ flashcache_map(struct dm_target *ti, struct bio *bio)
 	if (sectors <= 32)
 		size_hist[sectors]++;
 
+	/* barrier io */
 	if (bio_barrier(bio))
 		return -EOPNOTSUPP;
 
 	/*
 	 * Basic check to make sure blocks coming in are as we
 	 * expect them to be.
+	 */
+	/*
+	 * OyTao: all bio size are aligned by @block_size.
 	 */
 	flashcache_do_block_checks(dmc, bio);
 
@@ -2106,13 +2194,21 @@ flashcache_map(struct dm_target *ti, struct bio *bio)
 	else
 		dmc->flashcache_stats.writes++;
 
+	/* OyTao: pid check */
 	spin_lock_irqsave(&dmc->ioctl_lock, flags);
 	if (unlikely(dmc->sysctl_pid_do_expiry && 
 		     (dmc->whitelist_head || dmc->blacklist_head)))
 		flashcache_pid_expiry_all_locked(dmc);
+
+	/* 
+	 * OyTao: uncacheable:
+	 * 1. bypass_cache is True
+	 * 2. bio size is not the same as @block_size
+	 * 3. write operation in write around cache mode.
+	 */
 	uncacheable = (unlikely(dmc->bypass_cache) ||
 		       (to_sector(bio->bi_size) != dmc->block_size) ||
-		       /* 
+	       /* 
 			* If the op is a READ, we serve it out of cache whenever possible, 
 			* regardless of cacheablity 
 			*/
@@ -2120,7 +2216,9 @@ flashcache_map(struct dm_target *ti, struct bio *bio)
 			((dmc->cache_mode == FLASHCACHE_WRITE_AROUND) ||
 			 flashcache_uncacheable(dmc, bio))));
 	spin_unlock_irqrestore(&dmc->ioctl_lock, flags);
+
 	if (uncacheable) {
+		/* OyTao: invalid the block */
 		flashcache_setlocks_multiget(dmc, bio);
 		queued = flashcache_inval_blocks(dmc, bio);
 		flashcache_setlocks_multidrop(dmc, bio);
@@ -2132,6 +2230,7 @@ flashcache_map(struct dm_target *ti, struct bio *bio)
 			flashcache_start_uncached_io(dmc, bio);
 		}
 	} else {
+		/* OyTao: need cache this bio */
 		if (bio_data_dir(bio) == READ)
 			flashcache_read(dmc, bio);
 		else

@@ -12,7 +12,8 @@ endif
 # Check for RHEL/CentOS 7
 RHEL7_VER ?= $(shell if [ -e /etc/redhat-release ]; then grep " 7\\.[0-9]" /etc/redhat-release; else false; fi)
 ifneq "$(RHEL7_VER)" ""
-	RHEL7_TREE := /usr/src/kernels/$(shell uname -r)
+#	RHEL7_TREE := /usr/src/kernels/$(shell uname -r)
+	RHEL7_TREE := /root/kernel-4.2.8/linux-4.2.8
 	KERNEL_TREE := $(RHEL7_TREE)
 endif
 

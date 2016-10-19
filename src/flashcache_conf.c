@@ -101,6 +101,9 @@ flashcache_wait_schedule(void *unused)
 }
 #endif
 
+/*
+ * OyTao: create memory cache for kcached_job and pending_job.
+ */
 static int 
 flashcache_jobs_init(void)
 {
@@ -1815,6 +1818,13 @@ struct dm_io_client *flashcache_io_client; /* Client memory pool*/
 
 /*
  * Initiate a cache target.
+ */
+/*
+ * OyTao:
+ * 1. init mempool for kcopyd_job pending_job.
+ * 2. init dm_io_client & kcopyd_client 
+ * 3. init work queue (_kcached_wq)
+ * 4. target device register into device mapping layer.
  */
 int __init 
 flashcache_init(void)

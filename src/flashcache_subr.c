@@ -199,6 +199,9 @@ flashcache_invalid_insert(struct cache_c *dmc, int index)
 	cache_set->invalid_head = set_ix;
 }
 
+/*
+ * OyTao: remove one invalid cache-block from invalid list 
+ */
 void
 flashcache_invalid_remove(struct cache_c *dmc, int index)
 {
@@ -287,6 +290,7 @@ flashcache_hash_remove(struct cache_c *dmc, int index)
 }
 
 /* Must return -1 if not found ! */
+/* OyTao: only to find the @dbn cache block in cache set */
 int
 flashcache_hash_lookup(struct cache_c *dmc, 
 		       int set,
@@ -768,6 +772,8 @@ swap_dbn_index_pair(void *a, void *b, int size)
  * in our "to write" set, maintaining sorted order.
  * Has to be called under the cache spinlock !
  */
+
+
 void
 flashcache_merge_writes(struct cache_c *dmc, struct dbn_index_pair *writes_list, 
 			struct dbn_index_pair *set_dirty_list,

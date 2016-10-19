@@ -515,6 +515,7 @@ typedef u_int64_t sector_t;
 
 /* Cache block metadata structure */
 struct cacheblock {
+	/* OyTao: maybe valid, invalid, dirty ... */
 	u_int16_t	cache_state;
 	int16_t 	nr_queued;	/* jobs in pending queue */
 	u_int16_t	lru_prev, lru_next;
